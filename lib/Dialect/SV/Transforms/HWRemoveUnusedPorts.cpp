@@ -190,6 +190,24 @@ void HWRemoveUnusedPortsPass::visitValue(Value value) {
 
   // Otherwise, delete the value if its defining op is dead.
   if (auto *op = value.getDefiningOp()) {
+    if (isa<sv::RegOp, sv::WireOp>(op)) {
+      if (op->hasAttr("inner_sym"))
+        return;
+      // Check that all operations on the wire are sv.assigns. All other wire
+      // operations will have been handled by other canonicalization.
+      for (auto &use : op->getResult(0).getUses())
+        if (!isa<sv::AssignOp, sv::BPAssignOp, sv::PAssignOp>(use.getOwner()))
+          return;
+
+      // Remove all uses of the wire.
+      for (auto &use : llvm::make_early_inc_range(op->getResult(0).getUses())) {
+        addToWorklist(use.getOwner()->getOperand(1));
+        use.getOwner()->erase();
+      }
+      op->erase();
+      return;
+    }
+
     // Check that op can be erased. `isOpTriviallyDead` checks uses or
     // symbols appropriately. If the op is dead, add its operands to the
     // worklist.
