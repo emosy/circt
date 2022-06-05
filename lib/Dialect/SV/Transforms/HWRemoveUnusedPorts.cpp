@@ -170,10 +170,6 @@ void HWRemoveUnusedPortsPass::visitInputPort(StringAttr moduleName,
 }
 
 void HWRemoveUnusedPortsPass::visitValue(Value value) {
-  // If the value has an use, we cannot remove.
-  if (!value.use_empty())
-    return;
-
   // If the value is a result of instance, the result may be dead in every
   // instantiation.
   if (auto instance = value.getDefiningOp<HWInstanceLike>())

@@ -571,9 +571,9 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
 
     // TODO: Remove RemoveUnusedPortsPass at FIRRTL once it is confirmed that
     //       HWRemoveUnusedPortsPass works well.
-    if (removeUnusedPorts)
-      pm.nest<firrtl::CircuitOp>().addPass(
-          firrtl::createRemoveUnusedPortsPass());
+    // if (removeUnusedPorts)
+    //   pm.nest<firrtl::CircuitOp>().addPass(
+    //       firrtl::createRemoveUnusedPortsPass());
   }
 
   if (emitOMIR)
@@ -608,8 +608,8 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
         modulePM.addPass(createCSEPass());
         modulePM.addPass(sv::createHWCleanupPass());
       }
-      if (removeUnusedPorts)
-        pm.addPass(circt::sv::createHWRemoveUnusedPortsPass());
+      pm.addPass(circt::sv::createHWRemoveUnusedPortsPass());
+      // pm.nest<mlir::ModuleOp>().addPass(createSimpleCanonicalizerPass());
     }
   }
 
