@@ -51,6 +51,8 @@ struct DropNamePass : public DropNameBase<DropNamePass> {
     //        we have to drop names regardless of their liveness by replacing
     //        the entire logic with following code:
     //        module.walk([](FNamableOp op) { op.dropName(); });
+    getOperation().walk([](FNamableOp op) { op.dropName(); });
+    return;
     llvm::SmallDenseSet<Operation *> deadOperations;
     auto *block = getOperation().getBody();
     for (auto &op : llvm::reverse(*block)) {
