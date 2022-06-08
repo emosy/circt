@@ -1284,7 +1284,8 @@ void LowerTypesPass::runOnOperation() {
     // but only visit ones which end in this old InnerRefAttr.
     //
     // TODO: A utility on the NLATable for this query would refactor this.
-    for (auto path : nlaTable->lookup(oldRef.getModule())) {
+    ArrayRef<HierPathOp> foo = nlaTable->lookup(oldRef.getModule());
+    for (auto path : SmallVector<HierPathOp>(foo.begin(), foo.end())) {
       // Skip this hierarchical path if it targets the wrong InnerRefAttr.
       // (This also covers the case of not visiting any NLAs which end at
       // modules and do not target something inside the module.)
@@ -1298,7 +1299,8 @@ void LowerTypesPass::runOnOperation() {
       // Grab the old namepath.  We reuse all but the last element of this.
       SmallVector<Attribute> newNamepath{namepath.begin(), namepath.end()};
       ImplicitLocOpBuilder builder(path.getLoc(), path);
-      StringAttr newSym;
+      builder.setInsertionPointAfter(path);
+      StringAttr oldSym;
       assert(!newRefs.empty() && "LowerTypes should not delete InnerRefAttrs");
       for (auto &target : newRefs) {
         // Drop the last part of the namepath so we can replace it.
@@ -1306,11 +1308,16 @@ void LowerTypesPass::runOnOperation() {
 
         // Re-use the old hierarchical path symbol for the first new
         // hierarchical path.  Generate a new symbol for any later paths.
-        if (!newSym)
-          newSym = path.getNameAttr();
-        else
+        StringAttr newSym;
+        if (!oldSym) {
+          oldSym = path.getNameAttr();
+          newSym = oldSym;
+          // Delete the old hierarchical path from the NLA and symbol tables.
+          nlaTable->erase(path);
+          symTbl.erase(path);
+        } else
           newSym =
-              builder.getStringAttr(circtNamespace.newName(path.getName()));
+            builder.getStringAttr(circtNamespace.newName(oldSym.getValue()));
 
         // This is the new annotation sequence.  Put the update method into a
         // lambda to enable reuse for operation and port annotations.
@@ -1355,13 +1362,10 @@ void LowerTypesPass::runOnOperation() {
               llvm_unreachable("match on unkonwn AnnoTarget type");
             });
 
-        // Add the new hierarchical path to the NLA Table.
+        // Add the new hierarchical path to the NLA Table and Symbol Table.
         nlaTable->addNLA(newPath);
+        symTbl.insert(newPath);
       }
-
-      // Delete the old hierarchical path from the NLA and symbol tables.
-      nlaTable->erase(path);
-      symTbl.erase(path);
     }
   }
 
