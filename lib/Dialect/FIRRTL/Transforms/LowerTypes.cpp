@@ -41,6 +41,7 @@
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/Threading.h"
 #include "llvm/ADT/APSInt.h"
+#include "llvm/ADT/EquivalenceClasses.h"
 #include "llvm/Support/Parallel.h"
 
 using namespace circt;
@@ -336,6 +337,8 @@ struct TypeLoweringVisitor : public FIRRTLVisitor<TypeLoweringVisitor, bool> {
     return innerRefRenames;
   };
 
+  llvm::EquivalenceClasses<StringRef> &getOrigSymbols() { return origSymbols; };
+
 private:
   void processUsers(Value val, ArrayRef<Value> mapping);
   bool processSAPath(Operation *);
@@ -376,6 +379,8 @@ private:
   /// Record how a given hw::InnerRefAttr (a tuple of Module Name and Component
   /// Name) are renamed to one or more targets.
   DenseMap<hw::InnerRefAttr, SmallVector<AnnoTarget>> innerRefRenames;
+
+  llvm::EquivalenceClasses<StringRef> origSymbols;
 
   // Keep a symbol table around for resolving symbols
   SymbolTable &symTbl;
@@ -556,13 +561,6 @@ bool TypeLoweringVisitor::lowerProducer(
                                                needsSym, loweredSymName);
     auto *newOp = clone(field, loweredAttrs);
 
-    // If this is a ground type, record a rename to it.
-    if (field.type.isGround() && innerSymAttr) {
-      auto module = op->getParentOfType<FModuleOp>();
-      innerRefRenames[hw::InnerRefAttr::get(module.getNameAttr(), innerSymAttr)]
-          .push_back(OpAnnoTarget(newOp));
-    }
-
     // Carry over the name, if present.
     if (!loweredName.empty())
       newOp->setAttr(cache.nameAttr, StringAttr::get(context, loweredName));
@@ -571,6 +569,18 @@ bool TypeLoweringVisitor::lowerProducer(
       auto newName = StringAttr::get(context, loweredSymName);
       newOp->setAttr(cache.innerSymAttr, newName);
       assert(!loweredSymName.empty());
+
+      // If this operation has an inner symbol, then either record a
+      if (innerSymAttr) {
+        if (field.type.isGround()) {
+          auto module = op->getParentOfType<FModuleOp>();
+          innerRefRenames[hw::InnerRefAttr::get(module.getNameAttr(),
+                                                innerSymAttr)]
+              .push_back(OpAnnoTarget(newOp));
+        } else {
+          origSymbols.unionSets(innerSymAttr.getValue(), newName.getValue());
+        }
+      }
     }
     lowered.push_back(newOp->getResult(0));
   }
@@ -1259,6 +1269,7 @@ void LowerTypesPass::runOnOperation() {
   // Lower each module and return a list of Nlas which need to be updated with
   // the new symbol names.
   DenseMap<hw::InnerRefAttr, SmallVector<AnnoTarget>> innerRefRenames;
+  DenseMap<StringAttr, llvm::EquivalenceClasses<StringRef>> origSymbols;
   std::mutex nlaAppendLock;
   // This lambda, executes in parallel for each Op within the circt.
   auto lowerModules = [&](FModuleLike op) -> void {
@@ -1270,16 +1281,55 @@ void LowerTypesPass::runOnOperation() {
     // This section updates shared data structures using a lock.
     for (auto keyValue : tl.getRenames())
       innerRefRenames.insert(keyValue);
+
+    auto ec = tl.getOrigSymbols();
+    for (auto leader = ec.begin(), e = ec.end(); leader != e; ++leader) {
+      if (!leader->isLeader())
+        continue;
+      llvm::errs() << leader->getData() << " -> [";
+      for (auto i = ec.member_begin(leader), e = ec.member_end(); i != e; ++i) {
+        llvm::errs() << *i << ",";
+      }
+      llvm::errs() << "]\n";
+    }
+    origSymbols.insert({op.moduleNameAttr(), std::move(tl.getOrigSymbols())});
   };
   parallelForEach(&getContext(), ops.begin(), ops.end(), lowerModules);
+
+  llvm::errs() << "----------------------------------------\n";
+  for (auto path : getOperation().body().getOps<HierPathOp>())
+    llvm::errs() << "  - " << path << "\n";
+  llvm::errs() << "----------------------------------------\n";
 
   // Update all the hierarchical paths based on the innerRefRenames map.
   // Iterate over each InnerRefAttr that was updated.  Replace any hierarchical
   // paths that end in this InnerRefAttr with all values in the innerRefRenames
   // map.
   CircuitNamespace circtNamespace(getOperation());
+  DenseSet<HierPathOp> pathsToErase;
   for (auto pair : innerRefRenames) {
     auto [oldRef, newRefs] = pair;
+    llvm::errs() << oldRef << " -> "
+                 << "[";
+    oldRef = hw::InnerRefAttr::get(
+        oldRef.getModule(),
+        StringAttr::get(oldRef.getModule().getContext(),
+                        *origSymbols[oldRef.getModule()].findLeader(
+                            oldRef.getName().getValue())));
+    for (auto a : newRefs) {
+      if (auto port = a.dyn_cast<PortAnnoTarget>()) {
+        auto module = cast<FModuleLike>(port.getOp());
+        llvm::errs() << module.moduleName() << ">"
+                     << module.getPortName(port.getPortNo()) << ",";
+        continue;
+      }
+      auto module = a.getOp()->getParentOfType<FModuleOp>();
+      llvm::errs() << module.moduleName() << ">"
+                   << a.getOp()->getAttrOfType<StringAttr>("name").getValue()
+                   << ",";
+    }
+    llvm::errs() << "]\n";
+
     // Lookup all NLAs which participate in the module of the old InnerRefAttr,
     // but only visit ones which end in this old InnerRefAttr.
     //
@@ -1300,7 +1350,6 @@ void LowerTypesPass::runOnOperation() {
       SmallVector<Attribute> newNamepath{namepath.begin(), namepath.end()};
       ImplicitLocOpBuilder builder(path.getLoc(), path);
       builder.setInsertionPointAfter(path);
-      StringAttr oldSym;
       assert(!newRefs.empty() && "LowerTypes should not delete InnerRefAttrs");
       for (auto &target : newRefs) {
         // Drop the last part of the namepath so we can replace it.
@@ -1308,16 +1357,8 @@ void LowerTypesPass::runOnOperation() {
 
         // Re-use the old hierarchical path symbol for the first new
         // hierarchical path.  Generate a new symbol for any later paths.
-        StringAttr newSym;
-        if (!oldSym) {
-          oldSym = path.getNameAttr();
-          newSym = oldSym;
-          // Delete the old hierarchical path from the NLA and symbol tables.
-          nlaTable->erase(path);
-          symTbl.erase(path);
-        } else
-          newSym =
-            builder.getStringAttr(circtNamespace.newName(oldSym.getValue()));
+        StringAttr newSym =
+            builder.getStringAttr(circtNamespace.newName(path.getName()));
 
         // This is the new annotation sequence.  Put the update method into a
         // lambda to enable reuse for operation and port annotations.
@@ -1366,10 +1407,19 @@ void LowerTypesPass::runOnOperation() {
         nlaTable->addNLA(newPath);
         symTbl.insert(newPath);
       }
+
+      // Delete the old hierarchical path from the NLA and symbol tables.
+      pathsToErase.insert(path);
     }
   }
 
-  markAnalysesPreserved<NLATable>();
+  for (auto path : pathsToErase) {
+    nlaTable->erase(path, &symTbl);
+  }
+
+  llvm::errs() << "----------------------------------------\n";
+  for (auto path : getOperation().body().getOps<HierPathOp>())
+    llvm::errs() << "  - " << path << "\n";
 }
 
 /// This is the pass constructor.
