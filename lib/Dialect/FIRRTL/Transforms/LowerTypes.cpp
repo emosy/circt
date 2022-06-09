@@ -577,9 +577,8 @@ bool TypeLoweringVisitor::lowerProducer(
           innerRefRenames[hw::InnerRefAttr::get(module.getNameAttr(),
                                                 innerSymAttr)]
               .push_back(OpAnnoTarget(newOp));
-        } else {
-          origSymbols.unionSets(innerSymAttr.getValue(), newName.getValue());
         }
+        origSymbols.unionSets(innerSymAttr.getValue(), newName.getValue());
       }
     }
     lowered.push_back(newOp->getResult(0));
@@ -662,6 +661,8 @@ TypeLoweringVisitor::addArg(Operation *module, unsigned insertPt,
   if (needsSym || oldArgHadSym) {
     newSym = StringAttr::get(context, sym);
   }
+  if (oldArgHadSym)
+    origSymbols.unionSets(oldArg.sym.getValue(), newSym.getValue());
   return std::make_pair(newValue,
                         PortInfo{name, field.type, direction, newSym,
                                  oldArg.loc, AnnotationSet(newAnnotations)});
@@ -1282,11 +1283,12 @@ void LowerTypesPass::runOnOperation() {
     for (auto keyValue : tl.getRenames())
       innerRefRenames.insert(keyValue);
 
+    llvm::errs() << "Rename sets in " << op.moduleName() << ":\n";
     auto ec = tl.getOrigSymbols();
     for (auto leader = ec.begin(), e = ec.end(); leader != e; ++leader) {
       if (!leader->isLeader())
         continue;
-      llvm::errs() << leader->getData() << " -> [";
+      llvm::errs() << "  - " << leader->getData() << " -> [";
       for (auto i = ec.member_begin(leader), e = ec.member_end(); i != e; ++i) {
         llvm::errs() << *i << ",";
       }
@@ -1306,7 +1308,6 @@ void LowerTypesPass::runOnOperation() {
   // paths that end in this InnerRefAttr with all values in the innerRefRenames
   // map.
   CircuitNamespace circtNamespace(getOperation());
-  DenseSet<HierPathOp> pathsToErase;
   for (auto pair : innerRefRenames) {
     auto [oldRef, newRefs] = pair;
     llvm::errs() << oldRef << " -> "
@@ -1351,14 +1352,19 @@ void LowerTypesPass::runOnOperation() {
       ImplicitLocOpBuilder builder(path.getLoc(), path);
       builder.setInsertionPointAfter(path);
       assert(!newRefs.empty() && "LowerTypes should not delete InnerRefAttrs");
+      StringAttr newSym;
       for (auto &target : newRefs) {
         // Drop the last part of the namepath so we can replace it.
         newNamepath.pop_back();
 
         // Re-use the old hierarchical path symbol for the first new
         // hierarchical path.  Generate a new symbol for any later paths.
-        StringAttr newSym =
-            builder.getStringAttr(circtNamespace.newName(path.getName()));
+        if (!newSym) {
+          newSym = path.getNameAttr();
+          nlaTable->erase(path, &symTbl);
+        } else
+          newSym =
+              builder.getStringAttr(circtNamespace.newName(path.getName()));
 
         // This is the new annotation sequence.  Put the update method into a
         // lambda to enable reuse for operation and port annotations.
@@ -1407,14 +1413,7 @@ void LowerTypesPass::runOnOperation() {
         nlaTable->addNLA(newPath);
         symTbl.insert(newPath);
       }
-
-      // Delete the old hierarchical path from the NLA and symbol tables.
-      pathsToErase.insert(path);
     }
-  }
-
-  for (auto path : pathsToErase) {
-    nlaTable->erase(path, &symTbl);
   }
 
   llvm::errs() << "----------------------------------------\n";
