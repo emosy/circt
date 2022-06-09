@@ -1352,7 +1352,7 @@ void LowerTypesPass::runOnOperation() {
       ImplicitLocOpBuilder builder(path.getLoc(), path);
       builder.setInsertionPointAfter(path);
       assert(!newRefs.empty() && "LowerTypes should not delete InnerRefAttrs");
-      StringAttr newSym;
+      StringAttr newSym, oldSym = path.getNameAttr();
       for (auto &target : newRefs) {
         // Drop the last part of the namepath so we can replace it.
         newNamepath.pop_back();
@@ -1360,11 +1360,11 @@ void LowerTypesPass::runOnOperation() {
         // Re-use the old hierarchical path symbol for the first new
         // hierarchical path.  Generate a new symbol for any later paths.
         if (!newSym) {
-          newSym = path.getNameAttr();
+          newSym = oldSym;
           nlaTable->erase(path, &symTbl);
         } else
           newSym =
-              builder.getStringAttr(circtNamespace.newName(path.getName()));
+              builder.getStringAttr(circtNamespace.newName(oldSym.getValue()));
 
         // This is the new annotation sequence.  Put the update method into a
         // lambda to enable reuse for operation and port annotations.
